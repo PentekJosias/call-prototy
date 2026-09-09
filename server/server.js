@@ -278,9 +278,51 @@ function envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, n
         });
 }
 
-// ======================================================
-// SERVEUR HTTP (Pour le reveil Render, Diagnostic & Health Check)
-// ======================================================
+// =============================================================================
+// FONCTION APPEL MANQUÉ : notification système classique (pas la bannière d'appel)
+// - Utilise un vrai bloc "notification" FCM (pas data-only) : l'OS l'affiche
+//   TOUT SEUL même si l'app est fermée, sans dépendre du JS de l'app.
+// - Contrairement à la bannière d'appel entrant, celle-ci n'a pas besoin d'être
+//   interactive ni plein écran : c'est une simple information, comme un SMS.
+// - Reste dans le tiroir de notifications jusqu'à ce que l'utilisateur l'ouvre
+//   ou la balaie (comportement standard Android pour ce type de notification).
+// =============================================================================
+function envoyerNotificationAppelManque(tokenDestinataire, to, from, callId) {
+    if (!messaging || !tokenDestinataire) return;
+
+    const payload = {
+        token: tokenDestinataire,
+        notification: {
+            title: "Appel manqué",
+            body: `${from} a essayé de vous appeler`
+        },
+        data: {
+            type: "MISSED_CALL",
+            callId: String(callId || ""),
+            callerId: String(from),
+            appelant: String(from)
+        },
+        android: {
+            priority: "high",
+            notification: {
+                channelId: "missed_calls_channel",
+                icon: "ic_launcher",
+                color: "#00A884",
+                tag: `missed_${callId || from}`
+            }
+        }
+    };
+
+    messaging.send(payload)
+        .then(() => {
+            logCall("MISSED_CALL_NOTIFIED", { callId, from, to, info: "Notification d'appel manqué envoyée" });
+        })
+        .catch(error => {
+            gererErreurFCM(error, to);
+        });
+}
+
+
 const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
         "Content-Type": "application/json",
@@ -706,19 +748,16 @@ wss.on("connection", (ws) => {
             const notIdVal = String(Math.floor(10000 + Math.random() * 89999));
             const screenState = userScreenStates.get(to);
 
-            // ── SÉPARATION STRICTE TEST 1 vs TEST 2 ──────────────────────────
-            // Si le destinataire a son écran EXPLICITEMENT allumé en arrière-plan ET est connecté en WS :
-            // 👉 Utiliser TEST 1 (Bannière interactive avec [Refuser] et [Accepter], sans forçage)
-            // Dans TOUS les autres cas (veille, écran noir avec schéma, app fermée, hors-ligne) :
-            // 👉 Utiliser TEST 2 (Réveil physique de l'écran + Interface 2 active au-dessus du lockscreen)
-            const isStrictementEcranAllume = (screenState === "SCREEN_ON") && destinataireEnLigne;
-            if (isStrictementEcranAllume) {
-                console.log(`☀️ [TEST 1] Destinataire ${to} écran allumé et en ligne -> Push bannière interactive`);
-                envoyerPushTest1Banniere(tokenDestinataire, to, from, callId, offerStr, notIdVal);
-            } else {
-                console.log(`🌙 [TEST 2] Destinataire ${to} en veille ou hors ligne (${screenState || "défaut"}) -> Push réveil écran`);
-                envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, notIdVal);
-            }
+            // ── APPEL RÉEL : toujours TEST 2 (Interface 2 plein écran, persistante) ──
+            // Une bannière Android classique (TEST 1) se replie automatiquement après
+            // quelques secondes même en importance maximale : c'est un comportement
+            // système, pas un réglage qu'on peut corriger côté notification. Seul un
+            // écran plein écran (Activity) reste affiché tant que l'utilisateur n'a
+            // pas répondu. On unifie donc sur TEST 2 pour tout appel entrant réel,
+            // écran allumé ou non. TEST 1 reste disponible via /test-push-banniere
+            // pour comparaison/diagnostic, mais n'est plus utilisé en production.
+            console.log(`🌙 [APPEL] Destinataire ${to} (écran: ${screenState || "inconnu"}) -> Push Interface 2 plein écran`);
+            envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, notIdVal);
         } else if (isDestinataireAuPremierPlan) {
             console.log(`ℹ️ Destinataire ${to} a l'application ouverte au premier plan : push FCM non requis.`);
         } else if (!tokenDestinataire) {
@@ -767,6 +806,18 @@ wss.on("connection", (ws) => {
                         android: { priority: "high" }
                     }).catch(() => { });
                 }
+
+                // ── APPEL MANQUÉ : prévenir le destinataire, immédiatement (WS) s'il est
+                // connecté et via une vraie notification système dans tous les cas ──
+                envoyerAUtilisateur(to, {
+                    type: "call-missed",
+                    from: from,
+                    to: to,
+                    callId: callId,
+                    reason: "timeout"
+                });
+                envoyerNotificationAppelManque(token, to, from, callId);
+                logCall("MISSED_CALL", { callId, from, to, info: "Non répondu après 60s" });
             }
         }, 60000);
 
@@ -857,7 +908,8 @@ wss.on("connection", (ws) => {
             if (session) session.state = "ENDED";
         }
 
-        // Si l'appel était en attente (destinataire n'avait pas encore répondu), envoyer un push d'annulation
+        // Si l'appel était en attente (destinataire n'avait pas encore répondu) :
+        // c'est un appel manqué pour le destinataire, pas une simple fin d'appel.
         if (pendingOffers.has(to)) {
             const tokenTo = fcmTokens.get(to);
             if (tokenTo && messaging) {
@@ -873,6 +925,16 @@ wss.on("connection", (ws) => {
                     android: { priority: "high" }
                 }).catch(() => { });
             }
+
+            envoyerAUtilisateur(to, {
+                type: "call-missed",
+                from: from,
+                to: to,
+                callId: callId,
+                reason: "caller_cancelled"
+            });
+            envoyerNotificationAppelManque(tokenTo, to, from, callId);
+            logCall("MISSED_CALL", { callId, from, to, info: "Appelant a raccroché avant réponse" });
         }
 
         pendingOffers.delete(from);
