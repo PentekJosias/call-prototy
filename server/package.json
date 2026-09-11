@@ -1,16 +1,22 @@
 {
-  "name": "serveur",
+  "name": "kamsoft-call-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Serveur de signalisation d'appels (WebSocket) + envoi de push FCM pour KamSoft",
+  "main": "src/server.js",
+  "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "firebase-admin": "^14.3.0",
-    "ws": "^8.21.3"
+    "express": "^4.19.2",
+    "ws": "^8.18.0",
+    "firebase-admin": "^12.3.1",
+    "uuid": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
   }
 }
