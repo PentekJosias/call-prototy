@@ -1,22 +1,19 @@
 {
-  "name": "kamsoft-call-backend",
+  "name": "app-appel-backend",
   "version": "1.0.0",
-  "description": "Serveur de signalisation d'appels (WebSocket) + envoi de push FCM pour KamSoft",
-  "main": "src/server.js",
-  "type": "commonjs",
+  "description": "Serveur de signalisation WebSocket (WebRTC) + notifications push FCM pour l'application d'appel Cordova",
+  "main": "server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "express": "^4.21.2",
     "ws": "^8.18.0",
-    "firebase-admin": "^12.3.1",
-    "uuid": "^9.0.1",
-    "dotenv": "^16.4.5",
-    "cors": "^2.8.5"
+    "firebase-admin": "^13.0.2"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.4"
-  }
+  "license": "ISC"
 }
