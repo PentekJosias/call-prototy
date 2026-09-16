@@ -46,6 +46,19 @@ const userAppStates = new Map(); // identifiant -> isForeground (boolean)
 const userScreenStates = new Map(); // identifiant -> "SCREEN_ON" | "SCREEN_OFF"
 const appels = new Map();
 const pendingOffers = new Map();
+// ⚠️ CORRECTIF CRITIQUE : le client (index.js) N'ENVOIE JAMAIS callId dans les messages
+// "answer-call", "call-refused" et "call-end". Sans cette map, traiterCallAccepted ne
+// retrouvait donc jamais la session correspondante et ne la faisait jamais passer à l'état
+// CONNECTED : elle restait bloquée en RINGING, et le minuteur de sécurité de 60s raccrochait
+// alors AUTOMATIQUEMENT tous les appels, même ceux en cours de conversation normale.
+// callIdActif : identifiant -> callId de son appel RINGING/CONNECTED en cours.
+const callIdActif = new Map();
+
+function resoudreCallId(message, from, to) {
+    const fourni = String(message.callId || "").trim();
+    if (fourni) return fourni;
+    return callIdActif.get(from) || callIdActif.get(to) || "";
+}
 
 // MACHINE À ÉTATS SERVEUR & DÉDUPLICATION
 // callSessions : callId -> { callId, from, to, state: "RINGING" | "ACCEPTING" | "CONNECTED" | "REJECTED" | "ENDED", offer, createdAt }
@@ -442,9 +455,13 @@ function utilisateurOccupe(identifiant) {
     return appels.has(identifiant);
 }
 
-function creerAppel(utilisateurA, utilisateurB) {
+function creerAppel(utilisateurA, utilisateurB, callId) {
     appels.set(utilisateurA, utilisateurB);
     appels.set(utilisateurB, utilisateurA);
+    if (callId) {
+        callIdActif.set(utilisateurA, callId);
+        callIdActif.set(utilisateurB, callId);
+    }
     console.log(`📞 APPEL CREE : ${utilisateurA} <--> ${utilisateurB}`);
 }
 
@@ -452,10 +469,12 @@ function supprimerAppel(utilisateurA, utilisateurB) {
     if (utilisateurA) {
         appels.delete(utilisateurA);
         pendingOffers.delete(utilisateurA);
+        callIdActif.delete(utilisateurA);
     }
     if (utilisateurB) {
         appels.delete(utilisateurB);
         pendingOffers.delete(utilisateurB);
+        callIdActif.delete(utilisateurB);
     }
     console.log(`📴 APPEL TERMINE : ${utilisateurA} <--> ${utilisateurB}`);
 }
@@ -598,10 +617,16 @@ wss.on("connection", (ws) => {
         utilisateurs.set(identifiant, wsClient);
 
         // Sauvegarde du token FCM
-        if (message.fcmToken) {
-            fcmTokens.set(identifiant, message.fcmToken);
+        // ⚠️ CORRECTIF CRITIQUE : le client envoie le champ "pushToken" (voir index.js,
+        // sendSignal({type:"register-user", ..., pushToken: deviceToken})), jamais
+        // "fcmToken". Le serveur ne lisait que "fcmToken" : AUCUN token n'était donc
+        // jamais enregistré, quel que soit l'appareil, ce qui rendait toutes les
+        // notifications push FCM impossibles.
+        const fcmTokenRecu = message.fcmToken || message.pushToken;
+        if (fcmTokenRecu) {
+            fcmTokens.set(identifiant, fcmTokenRecu);
             sauvegarderTokensFCM();
-            console.log(`📲 TOKEN FCM ENREGISTRE pour ${identifiant} : ${message.fcmToken.substring(0, 20)}...`);
+            console.log(`📲 TOKEN FCM ENREGISTRE pour ${identifiant} : ${fcmTokenRecu.substring(0, 20)}...`);
         } else if (fcmTokens.has(identifiant)) {
             console.log(`📲 Token FCM deja conserve en memoire pour ${identifiant}`);
         } else {
@@ -717,7 +742,7 @@ wss.on("connection", (ws) => {
             return;
         }
 
-        creerAppel(from, to);
+        creerAppel(from, to, callId);
 
         // Enregistrement de la session d'appel serveur
         // ⚠️ CORRECTIF : isVideo n'était jamais mémorisé ni retransmis : côté destinataire,
@@ -855,7 +880,7 @@ wss.on("connection", (ws) => {
     function traiterCallAccepted(message) {
         const from = identifiant;
         const to = String(message.to || "").trim();
-        const callId = String(message.callId || "");
+        const callId = resoudreCallId(message, from, to);
 
         if (to === "") return;
 
@@ -894,7 +919,7 @@ wss.on("connection", (ws) => {
     function traiterCallRejected(message) {
         const from = identifiant;
         const to = String(message.to || "").trim();
-        const callId = String(message.callId || "");
+        const callId = resoudreCallId(message, from, to);
 
         if (to === "") return;
 
@@ -923,7 +948,7 @@ wss.on("connection", (ws) => {
     function traiterCallEnded(message) {
         const from = identifiant;
         const to = String(message.to || "").trim();
-        const callId = String(message.callId || "");
+        const callId = resoudreCallId(message, from, to);
 
         if (to === "") return;
 
