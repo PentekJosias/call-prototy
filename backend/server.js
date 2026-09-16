@@ -191,11 +191,19 @@ function envoyerPushTest1Banniere(tokenDestinataire, to, from, callId, offerStr,
     const payload = {
         token: tokenDestinataire,
         data: {
-            type: "APPEL",
+            // ⚠️ CORRECTIF CRITIQUE : CallMessagingService.java (Android natif) ET
+            // index.js (push.on("notification")) filtrent strictement sur
+            // data.type === "incoming-call". Avec "APPEL", le handler natif
+            // retournait immédiatement sans jamais construire ni afficher la
+            // notification — d'où "FCM_DELIVERED" côté serveur mais rien sur le
+            // téléphone. "mode" conserve la distinction Test1/Test2 pour la logique
+            // interne de l'app si besoin.
+            type: "incoming-call",
             mode: "TEST_1_BANNIERE",
             callId: String(callId),
             callerId: String(from),
             caller_name: String(from),
+            callerName: String(from),
             appelant: String(from),
             isVideo: String(!!isVideo),
             app_name: "KamSoft",
@@ -262,13 +270,15 @@ function envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, n
     const payload = {
         token: tokenDestinataire,
         data: {
-            type: "APPEL",
+            // ⚠️ CORRECTIF CRITIQUE : voir même correctif dans envoyerPushTest1Banniere.
+            type: "incoming-call",
             mode: "TEST_2_VEILLE",
             screen_wake: "true",
             target_mode: "LOCKSCREEN_WAKE",
             callId: String(callId),
             callerId: String(from),
             caller_name: String(from),
+            callerName: String(from),
             appelant: String(from),
             isVideo: String(!!isVideo),
             app_name: "KamSoft",
