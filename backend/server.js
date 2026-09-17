@@ -807,16 +807,20 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // 2. Envoi via Push Firebase FCM (Arrière-plan et Veille) :
-        // ⚠️ CORRECTIF : la notification s'affichait même quand l'utilisateur était
-        // déjà dans l'app (WS connecté ET message "incoming-call" bien reçu en direct).
-        // On ne déclenche désormais le push QUE si la livraison WS directe a échoué
-        // (utilisateur réellement hors ligne / app fermée / WS non connecté), ce qui
-        // correspond à "app pas ouverte" bien plus fidèlement que l'ancien flag
-        // isDestinataireAuPremierPlan (qui n'était de toute façon jamais renseigné).
+        // 2. Envoi via Push Firebase FCM (Arrière-plan, Veille et App tuée) :
+        // ⚠️ CORRECTIF : se baser sur "la livraison WS a réussi" pour décider d'envoyer
+        // le push était trop large — le WebSocket reste souvent connecté même quand
+        // l'app est simplement en arrière-plan (pas tuée), auquel cas l'utilisateur ne
+        // voit RIEN passer puisqu'il n'est pas sur l'écran d'appel. Le bon signal est le
+        // véritable état premier-plan/arrière-plan rapporté par le client via
+        // "SET_APP_STATE" (voir index.js : écouteurs Cordova "resume"/"pause").
+        // On n'envoie donc PAS de push seulement quand l'app est confirmée au premier
+        // plan ; dans tous les autres cas (arrière-plan, veille, tuée, état inconnu car
+        // jamais rapporté), le push est envoyé en complément de la tentative WS.
+        const estAuPremierPlan = userAppStates.get(to) === true;
         let pushTente = false;
 
-        if (!transmisWs && tokenDestinataire && messaging) {
+        if (!estAuPremierPlan && tokenDestinataire && messaging) {
             pushTente = true;
             const offerStr = message.offer
                 ? (typeof message.offer === "string" ? message.offer : JSON.stringify(message.offer))
@@ -838,8 +842,8 @@ wss.on("connection", (ws) => {
                 console.log(`🌙 [TEST 2] Destinataire ${to} en veille ou hors ligne (${screenState || "défaut"}) -> Push réveil écran`);
                 envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, notIdVal, isVideo);
             }
-        } else if (transmisWs) {
-            console.log(`ℹ️ Destinataire ${to} déjà joint en direct par WebSocket : push FCM non requis (pas de notification affichée).`);
+        } else if (estAuPremierPlan) {
+            console.log(`ℹ️ Destinataire ${to} confirmé au premier plan : push FCM non requis (l'app affiche déjà l'appel).`);
         } else if (!tokenDestinataire) {
             console.log(`⚠️ Aucun token FCM enregistré pour ${to}.`);
         } else if (!messaging) {
