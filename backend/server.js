@@ -769,14 +769,21 @@ wss.on("connection", (ws) => {
         };
         callSessions.set(callId, session);
 
+        // ⚠️ CORRECTIF : notId est généré une seule fois ici (au lieu d'être recréé plus
+        // bas uniquement au moment du push) et mémorisé dans pendingOffers/session, afin
+        // de pouvoir cibler précisément CETTE notification plus tard (annulation par
+        // l'appelant, appel manqué après 60s) au lieu de devoir tout annuler en aveugle.
+        const notIdVal = String(Math.floor(10000 + Math.random() * 89999));
+        session.notId = notIdVal;
+
         if (message.offer) {
-            pendingOffers.set(to, { from: from, offer: message.offer, callId: callId, isVideo: isVideo, createdAt: Date.now() });
+            pendingOffers.set(to, { from: from, offer: message.offer, callId: callId, isVideo: isVideo, notId: notIdVal, createdAt: Date.now() });
         }
 
         let transmisWs = false;
         // ⚠️ CORRECTIF : le client (index.js et le code natif Android) n'envoie JAMAIS
         // "SET_APP_STATE" / isForeground. userAppStates restait donc toujours vide et
-        // isDestinataireAuPremierPlan était TOUJOURS false — même quand les deux
+        // l'ancien flag isDestinataireAuPremierPlan était TOUJOURS false — même quand les deux
         // utilisateurs étaient connectés en WS au même moment. Conséquence concrète :
         // aucun appel ne pouvait jamais être transmis directement en WS, et tout
         // dépendait à 100% d'un token FCM valide + Firebase correctement configuré,
@@ -784,7 +791,6 @@ wss.on("connection", (ws) => {
         // On tente maintenant systématiquement la livraison WS directe dès que le
         // destinataire est connecté, et on garde le push FCM comme relais/réveil pour
         // les cas où l'app est réellement en arrière-plan ou fermée.
-        const isDestinataireAuPremierPlan = destinataireEnLigne && (userAppStates.get(to) === true);
 
         // 1. Envoi direct via WebSocket dès que le destinataire est connecté
         if (destinataireEnLigne) {
@@ -797,21 +803,26 @@ wss.on("connection", (ws) => {
                 isVideo: isVideo
             });
             if (transmisWs) {
-                logCall("WS_RECEIVED", { callId, from, to, state: "RINGING", info: "Transmis par WS direct (app au 1er plan)" });
+                logCall("WS_RECEIVED", { callId, from, to, state: "RINGING", info: "Transmis par WS direct (aucune notification nécessaire)" });
             }
         }
 
         // 2. Envoi via Push Firebase FCM (Arrière-plan et Veille) :
-        // ⚠️ Si l'app est au premier plan, aucun push n'est requis (l'interface interne s'affiche).
+        // ⚠️ CORRECTIF : la notification s'affichait même quand l'utilisateur était
+        // déjà dans l'app (WS connecté ET message "incoming-call" bien reçu en direct).
+        // On ne déclenche désormais le push QUE si la livraison WS directe a échoué
+        // (utilisateur réellement hors ligne / app fermée / WS non connecté), ce qui
+        // correspond à "app pas ouverte" bien plus fidèlement que l'ancien flag
+        // isDestinataireAuPremierPlan (qui n'était de toute façon jamais renseigné).
         let pushTente = false;
 
-        if (!isDestinataireAuPremierPlan && tokenDestinataire && messaging) {
+        if (!transmisWs && tokenDestinataire && messaging) {
             pushTente = true;
             const offerStr = message.offer
                 ? (typeof message.offer === "string" ? message.offer : JSON.stringify(message.offer))
                 : "";
 
-            const notIdVal = String(Math.floor(10000 + Math.random() * 89999));
+            // notIdVal déjà généré plus haut et mémorisé dans pendingOffers/session
             const screenState = userScreenStates.get(to);
 
             // ── SÉPARATION STRICTE TEST 1 vs TEST 2 ──────────────────────────
@@ -827,8 +838,8 @@ wss.on("connection", (ws) => {
                 console.log(`🌙 [TEST 2] Destinataire ${to} en veille ou hors ligne (${screenState || "défaut"}) -> Push réveil écran`);
                 envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, notIdVal, isVideo);
             }
-        } else if (isDestinataireAuPremierPlan) {
-            console.log(`ℹ️ Destinataire ${to} a l'application ouverte au premier plan : push FCM non requis.`);
+        } else if (transmisWs) {
+            console.log(`ℹ️ Destinataire ${to} déjà joint en direct par WebSocket : push FCM non requis (pas de notification affichée).`);
         } else if (!tokenDestinataire) {
             console.log(`⚠️ Aucun token FCM enregistré pour ${to}.`);
         } else if (!messaging) {
@@ -863,17 +874,23 @@ wss.on("connection", (ws) => {
                     reason: "timeout",
                     callId: callId
                 });
-                // Notifier le destinataire pour effacer la notification
-                const token = fcmTokens.get(to);
-                if (token && messaging) {
+                // Notifier le destinataire : annuler la notification d'appel entrant
+                // ET afficher une notification d'appel manqué (comportement standard
+                // téléphonie). ⚠️ CORRECTIF : l'ancien type "CANCEL_CALL" n'était traité
+                // nulle part côté Android (voir CallMessagingService.onMessageReceived,
+                // qui ignore tout ce qui n'est pas "incoming-call"), et ne contenait même
+                // pas notId pour cibler la bonne notification.
+                const notIdPourAnnulation = (session && session.notId) || "";
+                const tokenPourAnnulation = fcmTokens.get(to);
+                if (tokenPourAnnulation && messaging) {
                     messaging.send({
-                        token: token,
+                        token: tokenPourAnnulation,
                         data: {
-                            type: "CANCEL_CALL",
-                            action: "cancel_call",
+                            type: "MISSED_CALL",
                             from: String(from),
                             callerId: String(from),
-                            callId: String(callId)
+                            callId: String(callId),
+                            notId: String(notIdPourAnnulation)
                         },
                         android: { priority: "high" }
                     }).catch(() => { });
@@ -962,24 +979,31 @@ wss.on("connection", (ws) => {
 
         if (to === "") return;
 
+        let session = null;
         if (callId) {
             markCallEnded(callId);
-            const session = callSessions.get(callId);
+            session = callSessions.get(callId);
             if (session) session.state = "ENDED";
         }
 
-        // Si l'appel était en attente (destinataire n'avait pas encore répondu), envoyer un push d'annulation
-        if (pendingOffers.has(to)) {
+        // Si l'appel était en attente (destinataire n'avait pas encore répondu) :
+        // annuler la notification d'appel entrant ET afficher un "appel manqué".
+        // ⚠️ CORRECTIF : l'ancien type "CANCEL_CALL" n'était traité nulle part côté
+        // Android et ne contenait pas notId pour cibler la bonne notification —
+        // résultat, la notification restait affichée indéfiniment après l'annulation.
+        const infoAttente = pendingOffers.get(to);
+        if (infoAttente) {
+            const notIdPourAnnulation = infoAttente.notId || (session && session.notId) || "";
             const tokenTo = fcmTokens.get(to);
             if (tokenTo && messaging) {
                 messaging.send({
                     token: tokenTo,
                     data: {
-                        type: "CANCEL_CALL",
-                        action: "cancel_call",
+                        type: "MISSED_CALL",
                         from: String(from),
                         callerId: String(from),
-                        callId: String(callId || "")
+                        callId: String(callId || ""),
+                        notId: String(notIdPourAnnulation)
                     },
                     android: { priority: "high" }
                 }).catch(() => { });
