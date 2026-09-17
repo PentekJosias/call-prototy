@@ -270,7 +270,12 @@ function envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, n
     const payload = {
         token: tokenDestinataire,
         data: {
-            // ⚠️ CORRECTIF CRITIQUE : voir même correctif dans envoyerPushTest1Banniere.
+            // ⚠️ CORRECTIF CRITIQUE : "notId" manquait ici (présent seulement dans
+            // envoyerPushTest1Banniere). Sans lui, CallMessagingService.java retombe sur
+            // System.currentTimeMillis() comme identifiant de notification — une valeur
+            // totalement différente de celle que le serveur mémorise et renvoie plus tard
+            // dans le push "MISSED_CALL". Résultat : l'annulation/timeout ne trouvait
+            // jamais la bonne notification à effacer, elle restait affichée indéfiniment.
             type: "incoming-call",
             mode: "TEST_2_VEILLE",
             screen_wake: "true",
@@ -282,6 +287,7 @@ function envoyerPushTest2Veille(tokenDestinataire, to, from, callId, offerStr, n
             appelant: String(from),
             isVideo: String(!!isVideo),
             app_name: "KamSoft",
+            notId: String(notIdVal),
             offer: offerStr || "",
             "force-start": "1",
             "content-available": "1"
