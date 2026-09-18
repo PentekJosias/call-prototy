@@ -278,13 +278,13 @@ wss.on("connection", (ws) => {
             })
           );
         }
-        // ⚠️ AJOUT : annulation FCM indépendante du WebSocket. Indispensable
-        // quand le destinataire n'a reçu l'appel initial que par push (app
-        // tuée / pas encore reconnectée) : sans ceci, la notification et
-        // l'écran d'appel entrant natif ne sont jamais fermés.
+        // ⚠️ AJOUT : refus explicite du récepteur → type dédié CALL_DECLINED,
+        // SANS notification "Appel manqué" (le récepteur sait déjà qu'il a refusé).
+        // Ne pas confondre avec MISSED_CALL (voir call-end), qui lui doit afficher
+        // une trace "Appel manqué" côté récepteur.
         const callData = callId ? pendingCalls.get(callId) : null;
         if (callData) {
-          await envoyerAnnulationPush(callData.pushToken, callData.notId);
+          await envoyerAnnulationPush(callData.pushToken, callData.notId, "CALL_DECLINED");
         }
         return;
       }
@@ -301,7 +301,9 @@ wss.on("connection", (ws) => {
             })
           );
         }
-        // ⚠️ AJOUT : idem call-refused — voir commentaire ci-dessus.
+        // ⚠️ AJOUT : vrai appel manqué (l'appelant raccroche avant réponse) →
+        // type MISSED_CALL (valeur par défaut d'envoyerAnnulationPush), qui
+        // affichera une trace "Appel manqué" côté récepteur (voir CallMessagingService).
         const callData = callId ? pendingCalls.get(callId) : null;
         if (callData) {
           await envoyerAnnulationPush(callData.pushToken, callData.notId);
@@ -403,32 +405,31 @@ async function envoyerNotificationPush(tokenDestinataire, nomExpediteur, texteMe
 }
 
 /**
- * ⚠️ AJOUT : envoie un push FCM léger de type MISSED_CALL pour faire annuler
- * la notification d'appel entrant côté client. CallMessagingService.java
- * (handleMissedCall) sait déjà traiter ce type — il annule la notification,
- * libère le framework Telecom et ferme l'écran d'appel entrant natif.
- *
- * Ce push est indispensable en plus du relais WebSocket sur call-end /
- * call-refused : si le destinataire a reçu l'appel initial uniquement via
- * push (app tuée, ou WebSocket pas encore reconnecté pendant que
- * IncomingCallActivity démarre), le message WebSocket seul ne l'atteint
- * jamais et la notification reste affichée indéfiniment.
+ * Envoie un push FCM léger pour faire annuler la notification d'appel entrant
+ * côté client. Deux types possibles, traités différemment par
+ * CallMessagingService.java :
+ *   - "MISSED_CALL"   : vrai appel manqué (l'appelant a raccroché avant
+ *                       réponse). Annule la notif ET affiche une trace
+ *                       "Appel manqué" consultable par le récepteur.
+ *   - "CALL_DECLINED" : refus explicite du récepteur (bouton "Refuser").
+ *                       Annule la notif SEULEMENT, sans trace "Appel manqué"
+ *                       — le récepteur sait déjà qu'il vient de refuser.
  */
-async function envoyerAnnulationPush(tokenDestinataire, notId) {
+async function envoyerAnnulationPush(tokenDestinataire, notId, type = "MISSED_CALL") {
   if (!tokenDestinataire || !notId) return;
 
   try {
     await getMessaging().send({
       token: tokenDestinataire,
       data: {
-        type: "MISSED_CALL",
+        type: type,
         notId: String(notId),
       },
       android: {
         priority: "high",
       },
     });
-    console.log("📴 Push d'annulation (MISSED_CALL) envoyé, notId =", notId);
+    console.log(`📴 Push d'annulation (${type}) envoyé, notId =`, notId);
   } catch (error) {
     console.error("❌ Erreur lors de l'envoi du push d'annulation :", error);
   }
