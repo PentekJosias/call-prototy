@@ -6,7 +6,13 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getMessaging } = require("firebase-admin/messaging");
 
-const serviceAccount = require("./serviceAccountKey.json");
+// ⚠️ AJOUT : sur Render (et toute plateforme sans fichier de clé commité),
+// la clé de service Firebase est fournie via la variable d'environnement
+// FIREBASE_SERVICE_ACCOUNT (contenant le JSON complet en une seule ligne).
+// En local, on retombe sur le fichier serviceAccountKey.json s'il existe.
+const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
+  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+  : require("./serviceAccountKey.json");
 
 // Initialisation de Firebase
 initializeApp({
