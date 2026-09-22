@@ -368,6 +368,8 @@ wss.on("connection", (ws) => {
 
       // 7. Fin d'un appel
       if (type === "call-end") {
+        console.log(`⏱️ [${new Date().toISOString()}] call-end reçu du serveur (de ${ws.userId} vers ${targetId}, callId=${callId})`);
+
         const targetWs = users.get(targetId)?.ws;
         if (targetWs && targetWs.readyState === WebSocket.OPEN) {
           targetWs.send(
@@ -385,7 +387,10 @@ wss.on("connection", (ws) => {
         // déclenche bien MISSED_CALL côté récepteur, comme demandé.
         const callData = callId ? pendingCalls.get(callId) : null;
         if (callData) {
+          console.log(`⏱️ [${new Date().toISOString()}] callData trouvé, envoi immédiat du push d'annulation...`);
           await envoyerAnnulationPush(callData.pushToken, callData.notId);
+        } else {
+          console.log(`⚠️ [${new Date().toISOString()}] callData INTROUVABLE pour callId="${callId}" — aucun push envoyé ! (currentCallId probablement invalide côté A)`);
         }
         if (callId) pendingCalls.delete(callId); // évite un doublon avec le timeout 45s ci-dessous
         return;
@@ -498,6 +503,7 @@ async function envoyerNotificationPush(tokenDestinataire, nomExpediteur, texteMe
 async function envoyerAnnulationPush(tokenDestinataire, notId, type = "MISSED_CALL") {
   if (!tokenDestinataire || !notId) return;
 
+  console.log(`⏱️ [${new Date().toISOString()}] Appel à getMessaging().send() pour ${type}, notId=${notId}...`);
   try {
     await getMessaging().send({
       token: tokenDestinataire,
@@ -509,7 +515,7 @@ async function envoyerAnnulationPush(tokenDestinataire, notId, type = "MISSED_CA
         priority: "high",
       },
     });
-    console.log(`📴 Push d'annulation (${type}) envoyé, notId =`, notId);
+    console.log(`⏱️ [${new Date().toISOString()}] 📴 Push d'annulation (${type}) CONFIRMÉ envoyé par Firebase, notId =`, notId);
   } catch (error) {
     console.error("❌ Erreur lors de l'envoi du push d'annulation :", error);
   }
