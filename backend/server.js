@@ -153,8 +153,27 @@ wss.on("connection", (ws) => {
           pushToken: targetUser?.pushToken || null    // AJOUT
         });
 
-        // Supprimer l'offre après 45 secondes si non récupérée
-        setTimeout(() => pendingCalls.delete(newCallId), 45000);
+        // ⚠️ AJOUT : au bout de 45s, si l'entrée existe TOUJOURS, c'est que
+        // l'appel n'a été ni décroché (answer-call la supprime), ni refusé
+        // (call-refused la supprime), ni annulé par l'appelant (call-end la
+        // supprime). Autrement dit : B n'a pas répondu. C'est le vrai "appel
+        // manqué par absence de réponse" — jusqu'ici il n'était jamais signalé
+        // du tout, ni à A ni à B.
+        setTimeout(async () => {
+          const stillPending = pendingCalls.get(newCallId);
+          if (!stillPending) return; // déjà résolu (répondu / refusé / annulé)
+
+          pendingCalls.delete(newCallId);
+
+          // Prévenir B (qui sonne toujours) : annule sa notification + trace "Appel manqué"
+          await envoyerAnnulationPush(stillPending.pushToken, stillPending.notId);
+
+          // Prévenir A (l'appelant), s'il est toujours connecté, que ça n'a pas répondu
+          const callerWs = users.get(stillPending.from)?.ws;
+          if (callerWs && callerWs.readyState === WebSocket.OPEN) {
+            callerWs.send(JSON.stringify({ type: "call-timeout", targetId: stillPending.targetId }));
+          }
+        }, 45000);
 
         // CAS 1 : L'utilisateur est connecté en WebSocket
         if (targetWs && targetWs.readyState === WebSocket.OPEN) {
@@ -250,6 +269,11 @@ wss.on("connection", (ws) => {
             })
           );
         }
+        // ⚠️ AJOUT : l'appel est décroché → on supprime l'entrée pendingCalls.
+        // Indispensable pour que call-end (fin de conversation normale) et le
+        // timeout 45s ci-dessous ne déclenchent JAMAIS de push "appel manqué"
+        // pour un appel qui a réellement eu lieu, même s'il dure moins de 45s.
+        if (callId) pendingCalls.delete(callId);
         return;
       }
 
@@ -286,6 +310,7 @@ wss.on("connection", (ws) => {
         if (callData) {
           await envoyerAnnulationPush(callData.pushToken, callData.notId, "CALL_DECLINED");
         }
+        if (callId) pendingCalls.delete(callId); // AJOUT : appel résolu, plus besoin du timeout 45s
         return;
       }
 
@@ -301,13 +326,16 @@ wss.on("connection", (ws) => {
             })
           );
         }
-        // ⚠️ AJOUT : vrai appel manqué (l'appelant raccroche avant réponse) →
-        // type MISSED_CALL (valeur par défaut d'envoyerAnnulationPush), qui
-        // affichera une trace "Appel manqué" côté récepteur (voir CallMessagingService).
+        // ⚠️ AJOUT : callData n'existe ici QUE si l'appel n'a jamais été décroché
+        // (answer-call supprime l'entrée dès que l'appel est répondu, voir plus haut).
+        // Donc : raccrocher une conversation déjà en cours ne déclenche RIEN ici
+        // (comportement normal, pas un appel manqué) ; raccrocher avant réponse
+        // déclenche bien MISSED_CALL côté récepteur, comme demandé.
         const callData = callId ? pendingCalls.get(callId) : null;
         if (callData) {
           await envoyerAnnulationPush(callData.pushToken, callData.notId);
         }
+        if (callId) pendingCalls.delete(callId); // évite un doublon avec le timeout 45s ci-dessous
         return;
       }
 
