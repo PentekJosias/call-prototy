@@ -218,7 +218,14 @@ wss.on("connection", (ws) => {
           if (callerWs && callerWs.readyState === WebSocket.OPEN) {
             callerWs.send(JSON.stringify({ type: "call-timeout", targetId: stillPending.targetId }));
           }
-        }, 120000);
+        }, 45000);
+
+        // ⚠️ AJOUT : renvoyer immédiatement le callId généré à l'appelant (A).
+        // Sans ceci, A ne connaît jamais l'ID de son propre appel : hangUp()
+        // envoie alors call-end avec callId=null, pendingCalls.get(null) échoue,
+        // et aucune annulation immédiate n'est possible côté B — seul le
+        // timeout 45s finissait par nettoyer sa notification.
+        ws.send(JSON.stringify({ type: "call-initiated", callId: newCallId }));
 
         // CAS 1 : L'utilisateur est connecté en WebSocket
         if (targetWs && targetWs.readyState === WebSocket.OPEN) {
