@@ -65,8 +65,7 @@ app.post("/call-action", async (req, res) => {
       await envoyerAnnulationPush(
         callData.pushToken,
         callData.notId,
-        type === "call-refused" ? "CALL_DECLINED" : "MISSED_CALL",
-        callData.from
+        type === "call-refused" ? "CALL_DECLINED" : "MISSED_CALL"
       );
       pendingCalls.delete(callId);
     }
@@ -199,6 +198,34 @@ wss.on("connection", (ws) => {
           pushToken: targetUser?.pushToken || null    // AJOUT
         });
 
+        // ⚠️ AJOUT : au bout de 45s, si l'entrée existe TOUJOURS, c'est que
+        // l'appel n'a été ni décroché (answer-call la supprime), ni refusé
+        // (call-refused la supprime), ni annulé par l'appelant (call-end la
+        // supprime). Autrement dit : B n'a pas répondu. C'est le vrai "appel
+        // manqué par absence de réponse" — jusqu'ici il n'était jamais signalé
+        // du tout, ni à A ni à B.
+        setTimeout(async () => {
+          const stillPending = pendingCalls.get(newCallId);
+          if (!stillPending) return; // déjà résolu (répondu / refusé / annulé)
+
+          pendingCalls.delete(newCallId);
+
+          // Prévenir B (qui sonne toujours) : annule sa notification + trace "Appel manqué"
+          await envoyerAnnulationPush(stillPending.pushToken, stillPending.notId);
+
+          // Prévenir A (l'appelant), s'il est toujours connecté, que ça n'a pas répondu
+          const callerWs = users.get(stillPending.from)?.ws;
+          if (callerWs && callerWs.readyState === WebSocket.OPEN) {
+            callerWs.send(JSON.stringify({ type: "call-timeout", targetId: stillPending.targetId }));
+          }
+        }, 45000);
+
+        // ⚠️ AJOUT : renvoyer immédiatement le callId généré à l'appelant (A).
+        // Sans ceci, A ne connaît jamais l'ID de son propre appel : hangUp()
+        // envoie alors call-end avec callId=null, pendingCalls.get(null) échoue,
+        // et aucune annulation immédiate n'est possible côté B — seul le
+        // timeout 45s finissait par nettoyer sa notification.
+        ws.send(JSON.stringify({ type: "call-initiated", callId: newCallId }));
 
         // CAS 1 : L'utilisateur est connecté en WebSocket
         if (targetWs && targetWs.readyState === WebSocket.OPEN) {
@@ -339,9 +366,33 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // 7. Fin d'un appel (l'appelant ou un participant raccroche)
+      // 7. Fin d'un appel
       if (type === "call-end") {
-        await gererRaccrochageAppelant(callId, ws.userId, targetId);
+        console.log(`⏱️ [${new Date().toISOString()}] call-end reçu du serveur (de ${ws.userId} vers ${targetId}, callId=${callId})`);
+
+        const targetWs = users.get(targetId)?.ws;
+        if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+          targetWs.send(
+            JSON.stringify({
+              type: "call-end",
+              from: ws.userId,
+              target: targetId,
+            })
+          );
+        }
+        // ⚠️ AJOUT : callData n'existe ici QUE si l'appel n'a jamais été décroché
+        // (answer-call supprime l'entrée dès que l'appel est répondu, voir plus haut).
+        // Donc : raccrocher une conversation déjà en cours ne déclenche RIEN ici
+        // (comportement normal, pas un appel manqué) ; raccrocher avant réponse
+        // déclenche bien MISSED_CALL côté récepteur, comme demandé.
+        const callData = callId ? pendingCalls.get(callId) : null;
+        if (callData) {
+          console.log(`⏱️ [${new Date().toISOString()}] callData trouvé, envoi immédiat du push d'annulation...`);
+          await envoyerAnnulationPush(callData.pushToken, callData.notId);
+        } else {
+          console.log(`⚠️ [${new Date().toISOString()}] callData INTROUVABLE pour callId="${callId}" — aucun push envoyé ! (currentCallId probablement invalide côté A)`);
+        }
+        if (callId) pendingCalls.delete(callId); // évite un doublon avec le timeout 45s ci-dessous
         return;
       }
 
@@ -439,44 +490,6 @@ async function envoyerNotificationPush(tokenDestinataire, nomExpediteur, texteMe
 }
 
 /**
- * Gère le raccrochage de l'appelant (A) :
- * - Si l'appel n'a jamais été décroché par B : c'est un VRAI APPEL MANQUÉ.
- *   On annule la sonnerie de B et on lui affiche la notification "Appel manqué"
- *   avec le nom/ID de l'appelant A.
- * - Si l'appel était déjà en cours : fin de conversation normale.
- * Dans tous les cas, informe B en WebSocket s'il est actuellement connecté.
- */
-async function gererRaccrochageAppelant(callId, fromUserId, targetId) {
-  // 1. Relayer l'événement call-end en WebSocket vers B (ferme l'écran d'appel s'il a l'application ouverte)
-  const targetWs = users.get(targetId)?.ws;
-  if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-    targetWs.send(
-      JSON.stringify({
-        type: "call-end",
-        from: fromUserId,
-        target: targetId,
-      })
-    );
-  }
-
-  // 2. Vérifier si l'appel était encore en attente de réponse
-  const callData = callId ? pendingCalls.get(callId) : null;
-  if (callData) {
-    pendingCalls.delete(callId);
-
-    // Push FCM d'annulation : stoppe la sonnerie de B et affiche "Appel manqué" avec le nom de A
-    await envoyerAnnulationPush(
-      callData.pushToken,
-      callData.notId,
-      "MISSED_CALL",
-      fromUserId || callData.from
-    );
-
-    console.log(`📞 Appel manqué : ${fromUserId || callData.from} a raccroché avant réponse de ${targetId}`);
-  }
-}
-
-/**
  * Envoie un push FCM léger pour faire annuler la notification d'appel entrant
  * côté client. Deux types possibles, traités différemment par
  * CallMessagingService.java :
@@ -487,23 +500,22 @@ async function gererRaccrochageAppelant(callId, fromUserId, targetId) {
  *                       Annule la notif SEULEMENT, sans trace "Appel manqué"
  *                       — le récepteur sait déjà qu'il vient de refuser.
  */
-async function envoyerAnnulationPush(tokenDestinataire, notId, type = "MISSED_CALL", callerId = null) {
+async function envoyerAnnulationPush(tokenDestinataire, notId, type = "MISSED_CALL") {
   if (!tokenDestinataire || !notId) return;
 
+  console.log(`⏱️ [${new Date().toISOString()}] Appel à getMessaging().send() pour ${type}, notId=${notId}...`);
   try {
     await getMessaging().send({
       token: tokenDestinataire,
       data: {
         type: type,
         notId: String(notId),
-        callerId: callerId ? String(callerId) : "",
-        callerName: callerId ? String(callerId) : "",
       },
       android: {
         priority: "high",
       },
     });
-    console.log(`📴 Push d'annulation (${type}) envoyé, notId =`, notId, callerId ? `(caller: ${callerId})` : "");
+    console.log(`⏱️ [${new Date().toISOString()}] 📴 Push d'annulation (${type}) CONFIRMÉ envoyé par Firebase, notId =`, notId);
   } catch (error) {
     console.error("❌ Erreur lors de l'envoi du push d'annulation :", error);
   }
@@ -513,4 +525,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () =>
   console.log(`🚀 Serveur WebSocket actif sur le port ${PORT}`)
 );
-
