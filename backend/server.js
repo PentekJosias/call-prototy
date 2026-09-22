@@ -198,27 +198,11 @@ wss.on("connection", (ws) => {
           pushToken: targetUser?.pushToken || null    // AJOUT
         });
 
-        // ⚠️ AJOUT : au bout de 45s, si l'entrée existe TOUJOURS, c'est que
-        // l'appel n'a été ni décroché (answer-call la supprime), ni refusé
-        // (call-refused la supprime), ni annulé par l'appelant (call-end la
-        // supprime). Autrement dit : B n'a pas répondu. C'est le vrai "appel
-        // manqué par absence de réponse" — jusqu'ici il n'était jamais signalé
-        // du tout, ni à A ni à B.
-        setTimeout(async () => {
-          const stillPending = pendingCalls.get(newCallId);
-          if (!stillPending) return; // déjà résolu (répondu / refusé / annulé)
-
-          pendingCalls.delete(newCallId);
-
-          // Prévenir B (qui sonne toujours) : annule sa notification + trace "Appel manqué"
-          await envoyerAnnulationPush(stillPending.pushToken, stillPending.notId);
-
-          // Prévenir A (l'appelant), s'il est toujours connecté, que ça n'a pas répondu
-          const callerWs = users.get(stillPending.from)?.ws;
-          if (callerWs && callerWs.readyState === WebSocket.OPEN) {
-            callerWs.send(JSON.stringify({ type: "call-timeout", targetId: stillPending.targetId }));
-          }
-        }, 45000);
+        // ⚠️ RETIRÉ (temporairement, à la demande) : le raccroché automatique après
+        // 45s sans réponse (avec envoi de MISSED_CALL + "call-timeout" à l'appelant).
+        // pendingCalls n'est donc plus nettoyé automatiquement ici — seuls
+        // answer-call / call-refused / call-end le suppriment désormais. À
+        // réintroduire plus tard si besoin (cf. historique de conversation).
 
         // ⚠️ AJOUT : renvoyer immédiatement le callId généré à l'appelant (A).
         // Sans ceci, A ne connaît jamais l'ID de son propre appel : hangUp()
