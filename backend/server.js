@@ -218,7 +218,7 @@ wss.on("connection", (ws) => {
           if (callerWs && callerWs.readyState === WebSocket.OPEN) {
             callerWs.send(JSON.stringify({ type: "call-timeout", targetId: stillPending.targetId }));
           }
-        }, 45000);
+        }, 120000);
 
         // CAS 1 : L'utilisateur est connecté en WebSocket
         if (targetWs && targetWs.readyState === WebSocket.OPEN) {
