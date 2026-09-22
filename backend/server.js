@@ -29,8 +29,53 @@ const users = new Map();
 // Stockage temporaire en mémoire RAM pour les offres d'appel (évite de surcharger FCM)
 const pendingCalls = new Map();
 
+app.use(express.json());
+
 app.get("/", (req, res) => {
   res.send("Serveur WebSocket actif");
+});
+
+// =========================================================
+// ⚠️ AJOUT : endpoint HTTP pour les actions natives Android qui ne peuvent
+// pas garder une connexion WebSocket ouverte (CallNotificationReceiver,
+// déclenché par le bouton "Refuser" de la notification quand aucune activité
+// n'est ouverte — écran verrouillé, app tuée). Applique exactement la même
+// logique que les handlers WebSocket "call-refused" / "call-end" ci-dessous :
+// relaie l'action à l'appelant s'il est connecté, et nettoie la notification
+// d'appel entrant côté récepteur via un push d'annulation.
+// =========================================================
+app.post("/call-action", async (req, res) => {
+  try {
+    const { type, targetId, callId } = req.body || {};
+
+    if (!targetId || (type !== "call-refused" && type !== "call-end")) {
+      return res.status(400).json({ error: "Requête invalide" });
+    }
+
+    // 1. Relayer l'action à l'appelant (targetId) s'il est connecté en WebSocket
+    const targetWs = users.get(targetId)?.ws;
+    if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+      targetWs.send(JSON.stringify({ type, from: null }));
+    }
+
+    // 2. Nettoyer la notification/l'UI d'appel entrant côté récepteur (redondant
+    // mais inoffensif si déjà fait localement par CallNotificationReceiver)
+    const callData = callId ? pendingCalls.get(callId) : null;
+    if (callData) {
+      await envoyerAnnulationPush(
+        callData.pushToken,
+        callData.notId,
+        type === "call-refused" ? "CALL_DECLINED" : "MISSED_CALL"
+      );
+      pendingCalls.delete(callId);
+    }
+
+    console.log(`📞 /call-action reçu : ${type} → relayé vers ${targetId}`);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("❌ Erreur /call-action :", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
 });
 
 // =========================================================
@@ -173,7 +218,7 @@ wss.on("connection", (ws) => {
           if (callerWs && callerWs.readyState === WebSocket.OPEN) {
             callerWs.send(JSON.stringify({ type: "call-timeout", targetId: stillPending.targetId }));
           }
-        }, 120000);
+        }, 45000);
 
         // CAS 1 : L'utilisateur est connecté en WebSocket
         if (targetWs && targetWs.readyState === WebSocket.OPEN) {
