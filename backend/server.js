@@ -368,6 +368,7 @@ async function envoyerNotificationPush(
   from,
   callId,
   isVideo = false,
+  notId,
 ) {
   if (!tokenDestinataire) {
     console.warn(
@@ -376,7 +377,9 @@ async function envoyerNotificationPush(
     return;
   }
 
-  const notId = Math.floor(100000 + Math.random() * 900000);
+  // notId fourni par l'appelant : la notification "appel manqué" doit utiliser
+  // le même identifiant pour remplacer la notification d'appel entrant
+  const finalNotId = notId || Math.floor(100000 + Math.random() * 900000);
 
   const payload = {
     token: tokenDestinataire,
@@ -388,7 +391,7 @@ async function envoyerNotificationPush(
       callerName: String(nomExpediteur || from),
       callId: String(callId), // Transmet uniquement l'identifiant léger de l'appel
       isVideo: String(isVideo),
-      notId: String(notId),
+      notId: String(finalNotId),
       actions: JSON.stringify([
         {
           title: "Refuser",
